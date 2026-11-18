@@ -3,6 +3,7 @@
 /docs/
 /data_preview/
 /tests/
+/reports/
 
 # Python bytecode and build artifacts
 __pycache__/

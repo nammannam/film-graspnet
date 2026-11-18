@@ -41,10 +41,13 @@ def parse_args(argv=None):
     parser.add_argument("--run-name", default="filmgrasp_debug01")
     parser.add_argument("--output-root", type=Path, default=Path("runs"))
     parser.add_argument("--pretrained", type=Path, default=Path("checkpoints/grconvnet3_pretrained.pth"))
+    parser.add_argument("--dropout-prob", type=float, default=0.0)
     parser.add_argument("--resume", type=Path)
     args = parser.parse_args(argv)
     if args.epochs < 1 or args.batch_size < 1 or args.num_workers < 0 or args.lr <= 0:
         parser.error("epochs, batch-size and lr must be positive; num-workers must be nonnegative")
+    if not 0 <= args.dropout_prob < 1:
+        parser.error("dropout-prob must satisfy 0 <= p < 1")
     if args.device == "cuda" and not torch.cuda.is_available():
         parser.error("CUDA was requested but is unavailable")
     return args
@@ -56,6 +59,7 @@ def _collate(samples):
         "prompt": [s["prompt"] for s in samples],
         "targets": {name: torch.stack([s["targets"][name] for s in samples]) for name in TARGET_NAMES},
         "sample_id": [s["sample_id"] for s in samples],
+        "scene_id": [s["scene_id"] for s in samples],
     }
     if "annotations" in samples[0]:
         batch["annotations"] = [s["annotations"] for s in samples]
@@ -93,8 +97,22 @@ def create_dataloaders(args):
                         "validation": _summary(val_data, args.val_root)}
 
 
-def build_model(pretrained, device):
-    backbone = GRConvNet3(input_channels=3, output_channels=1, channel_size=32, dropout=False)
+def dropout_settings(config):
+    """Resolve saved settings; checkpoints predating A1 used Dropout OFF."""
+    enabled = config.get("dropout_enabled", False)
+    prob = config.get("dropout_prob", 0.0)
+    if not isinstance(enabled, bool) or not isinstance(prob, (int, float)) or not 0 <= prob < 1:
+        raise ValueError("Invalid Dropout configuration")
+    if enabled != (prob > 0):
+        raise ValueError("Inconsistent Dropout configuration")
+    return enabled, float(prob)
+
+
+def build_model(pretrained, device, dropout_enabled=False, dropout_prob=0.0):
+    dropout_enabled, dropout_prob = dropout_settings(
+        {"dropout_enabled": dropout_enabled, "dropout_prob": dropout_prob})
+    backbone = GRConvNet3(input_channels=3, output_channels=1, channel_size=32,
+                          dropout=dropout_enabled, prob=dropout_prob)
     if not pretrained.is_file():
         raise FileNotFoundError("Missing pretrained backbone: {}".format(pretrained))
     backbone.load_state_dict(torch.load(pretrained, map_location="cpu"), strict=True)
@@ -137,7 +155,9 @@ def train_one_epoch(model, loader, optimizer, device):
         images, targets = _prepare(batch, device)
         optimizer.zero_grad(set_to_none=True)
         predictions = model(images, batch["prompt"])
+
         loss, components = grasp_loss(predictions, targets)
+
         if not torch.isfinite(loss).item():
             raise FloatingPointError("Nonfinite training loss for {}".format(batch["sample_id"]))
         loss.backward()
@@ -159,7 +179,7 @@ def aggregate_grasps(results):
             "evaluated_samples": n}
 
 
-def validate_one_epoch(model, loader, device):
+def validate_one_epoch(model, loader, device, sample_callback=None):
     model.eval()
     totals, count, results = _loss_totals(), 0, []
     with torch.no_grad():
@@ -176,9 +196,12 @@ def validate_one_epoch(model, loader, device):
                     raise ValueError("Invalid ground truth for {}".format(batch["sample_id"][i]))
                 single = tuple(head[i] for head in predictions)
                 try:
-                    results.append(evaluate_grasp(single, annotations, threshold=0.25))
+                    result = evaluate_grasp(single, annotations, threshold=0.25)
+                    results.append(result)
                 except Exception as exc:
                     raise ValueError("Grasp evaluation failed for {}".format(batch["sample_id"][i])) from exc
+                if sample_callback is not None:
+                    sample_callback(batch, i, single, result)
             count += n
     metrics = _averages(totals, count)
     metrics.update(aggregate_grasps(results))
@@ -186,10 +209,12 @@ def validate_one_epoch(model, loader, device):
 
 
 def _checkpoint(model, optimizer, epoch, best_accuracy, best_loss, config, data_summary):
+    dropout_enabled, dropout_prob = dropout_settings(config)
     return {"epoch": epoch, "model_state_dict": {k: v.cpu() for k, v in model.state_dict().items()
              if not k.startswith("text_encoder.")},
             "optimizer_state_dict": optimizer.state_dict(), "best_val_accuracy": best_accuracy,
             "best_val_loss": best_loss, "config": config, "data_summary": data_summary,
+            "dropout_enabled": dropout_enabled, "dropout_prob": dropout_prob,
             "rng_state": torch.get_rng_state(), "numpy_rng_state": np.random.get_state(),
             "python_rng_state": random.getstate(),
             "cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None}
@@ -217,6 +242,12 @@ def load_checkpoint(path, model, optimizer, config, data_summary):
     
     saved = load_trusted_training_checkpoint(path)
     old = saved.get("config", {})
+    old_dropout = dropout_settings(old)
+    if (saved.get("dropout_enabled", old_dropout[0]),
+            saved.get("dropout_prob", old_dropout[1])) != old_dropout:
+        raise ValueError("Checkpoint Dropout metadata mismatch")
+    if old_dropout != dropout_settings(config):
+        raise ValueError("Resume configuration mismatch: Dropout")
     
     for key in ("pretrained_sha256", "batch_size", "lr", "seed", "optimizer", "clip_model"):
         if old.get(key) != config.get(key):
@@ -274,7 +305,10 @@ def main(argv=None):
     
     
     logger = _logger(run_dir / "train.log")
-    config = {"model": "FiLMGraspNet", "backbone": "GRConvNet3 RGB 32 channels dropout=False",
+    dropout_enabled = args.dropout_prob > 0
+    config = {"model": "FiLMGraspNet",
+              "backbone": "GRConvNet3 RGB 32 channels dropout={}".format(dropout_enabled),
+              "dropout_enabled": dropout_enabled, "dropout_prob": args.dropout_prob,
               "clip_model": "ViT-B/32", "clip_device": "cpu", "input_resolution": [416, 416],
               "optimizer": "Adam", "lr": args.lr, "batch_size": args.batch_size, "epochs": args.epochs,
               "num_workers": args.num_workers, "seed": args.seed, "device": str(device),
@@ -282,10 +316,11 @@ def main(argv=None):
               "pretrained": str(args.pretrained),
               "pretrained_sha256": hashlib.sha256(args.pretrained.read_bytes()).hexdigest(),
               "torch_version": torch.__version__, "numpy_version": np.__version__}
-    model = build_model(args.pretrained, device)
+
+    model = build_model(args.pretrained, device, dropout_enabled, args.dropout_prob)
     optimizer = torch.optim.Adam(list(model.backbone.parameters()) + list(model.film.parameters()), lr=args.lr)
-    start, best_accuracy, best_loss = 1, -1.0, float("inf")
     
+    start, best_accuracy, best_loss = 1, -1.0, float("inf")
     
     if args.resume:
         saved = load_checkpoint(args.resume, model, optimizer, config, data_summary)

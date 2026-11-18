@@ -20,7 +20,6 @@ Original license and applicable attribution requirements must be
 retained when redistributing this code.
 """
 import torch
-import matplotlib.pyplot as plt
 import numpy as np
 from skimage.draw import polygon
 from skimage.feature import peak_local_max
@@ -239,6 +238,8 @@ class GraspRectangles:
         :param shape: (optional) Plot shape if no existing axis
         """
         if ax is None:
+            import matplotlib.pyplot as plt
+
             f = plt.figure()
             ax = f.add_subplot(1, 1, 1)
             ax.imshow(np.zeros(shape))
