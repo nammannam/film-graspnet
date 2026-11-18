@@ -490,7 +490,7 @@ class Grasp:
                 [y2 + self.width / 2 * xo, x2 + self.width / 2 * yo],
                 [y1 + self.width / 2 * xo, x1 + self.width / 2 * yo],
             ]
-        ).astype(np.float))
+        ).astype(float)) # namng: change from np.float to float to avoid deprecation warning
 
     def max_iou(self, grs):
         """
