@@ -18,7 +18,7 @@ from PIL import Image, ImageOps
 
 from filmgrasp.data.dataset import GraspAnythingPPDataset
 from filmgrasp.evaluation.grasp_metrics import annotations_to_rectangles, decode_grasp, evaluate_grasp
-from filmgrasp.training.train import build_model
+from filmgrasp.training.train import build_model, load_trusted_training_checkpoint
 
 COLUMNS = ("sample_id", "scene_id", "prompt", "detected", "success", "max_iou",
            "pred_center_row", "pred_center_col", "pred_angle_deg", "pred_length_px",
@@ -50,7 +50,7 @@ def load_trained_model(path, device):
     """Reconstruct CLIP and restore every saved backbone/FiLM tensor."""
     if not path.is_file():
         raise FileNotFoundError("Checkpoint not found: {}".format(path))
-    checkpoint = torch.load(path, map_location="cpu")
+    checkpoint = load_trusted_training_checkpoint(path)
     config = checkpoint.get("config", {})
     if config.get("model") != "FiLMGraspNet" or config.get("clip_model") != "ViT-B/32":
         raise ValueError("Incompatible checkpoint model or CLIP identifier")

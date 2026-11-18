@@ -3,6 +3,7 @@
 import argparse
 import csv
 import hashlib
+import inspect
 import json
 import logging
 import random
@@ -201,11 +202,20 @@ def save_checkpoint(path, model, optimizer, epoch, best_accuracy, best_loss, con
     temporary.replace(path)
 
 
+def load_trusted_training_checkpoint(path):
+    """Load a project-generated training checkpoint from a trusted source only."""
+    load_kwargs = {"map_location": "cpu"}
+    if "weights_only" in inspect.signature(torch.load).parameters:
+        # Full training checkpoints contain NumPy RNG state; never use this for untrusted files.
+        load_kwargs["weights_only"] = False
+    return torch.load(path, **load_kwargs)
+
+
 def load_checkpoint(path, model, optimizer, config, data_summary):
     if not path.is_file():
         raise FileNotFoundError("Resume checkpoint not found: {}".format(path))
     
-    saved = torch.load(path, map_location="cpu")
+    saved = load_trusted_training_checkpoint(path)
     old = saved.get("config", {})
     
     for key in ("pretrained_sha256", "batch_size", "lr", "seed", "optimizer", "clip_model"):
