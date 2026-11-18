@@ -40,7 +40,8 @@ def parse_args(argv=None):
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--run-name", default="filmgrasp_debug01")
     parser.add_argument("--output-root", type=Path, default=Path("runs"))
-    parser.add_argument("--pretrained", type=Path, default=Path("checkpoints/grconvnet3_pretrained.pth"))
+    parser.add_argument("--pretrained", type=Path, default=None,
+                        help="GRConvNet3 weights; omit to train the backbone from random initialization")
     parser.add_argument("--dropout-prob", type=float, default=0.0)
     parser.add_argument("--resume", type=Path)
     args = parser.parse_args(argv)
@@ -108,14 +109,23 @@ def dropout_settings(config):
     return enabled, float(prob)
 
 
+def backbone_init_mode(config):
+    """Older checkpoints always loaded pretrained backbone weights."""
+    mode = config.get("backbone_init", "pretrained")
+    if mode not in ("pretrained", "random"):
+        raise ValueError("Invalid backbone initialization mode: {}".format(mode))
+    return mode
+
+
 def build_model(pretrained, device, dropout_enabled=False, dropout_prob=0.0):
     dropout_enabled, dropout_prob = dropout_settings(
         {"dropout_enabled": dropout_enabled, "dropout_prob": dropout_prob})
     backbone = GRConvNet3(input_channels=3, output_channels=1, channel_size=32,
                           dropout=dropout_enabled, prob=dropout_prob)
-    if not pretrained.is_file():
-        raise FileNotFoundError("Missing pretrained backbone: {}".format(pretrained))
-    backbone.load_state_dict(torch.load(pretrained, map_location="cpu"), strict=True)
+    if pretrained is not None:
+        if not pretrained.is_file():
+            raise FileNotFoundError("Missing pretrained backbone: {}".format(pretrained))
+        backbone.load_state_dict(torch.load(pretrained, map_location="cpu"), strict=True)
     encoder = CLIPTextEncoder(model_name="ViT-B/32", device="cpu")
     model = FiLMGraspNet(backbone, encoder)
     # CLIP stays on CPU to fit the 4 GB GPU.
@@ -248,6 +258,8 @@ def load_checkpoint(path, model, optimizer, config, data_summary):
         raise ValueError("Checkpoint Dropout metadata mismatch")
     if old_dropout != dropout_settings(config):
         raise ValueError("Resume configuration mismatch: Dropout")
+    if backbone_init_mode(old) != backbone_init_mode(config):
+        raise ValueError("Resume configuration mismatch: backbone initialization")
     
     for key in ("pretrained_sha256", "batch_size", "lr", "seed", "optimizer", "clip_model"):
         if old.get(key) != config.get(key):
@@ -308,13 +320,15 @@ def main(argv=None):
     dropout_enabled = args.dropout_prob > 0
     config = {"model": "FiLMGraspNet",
               "backbone": "GRConvNet3 RGB 32 channels dropout={}".format(dropout_enabled),
+              "backbone_init": "pretrained" if args.pretrained is not None else "random",
               "dropout_enabled": dropout_enabled, "dropout_prob": args.dropout_prob,
               "clip_model": "ViT-B/32", "clip_device": "cpu", "input_resolution": [416, 416],
               "optimizer": "Adam", "lr": args.lr, "batch_size": args.batch_size, "epochs": args.epochs,
               "num_workers": args.num_workers, "seed": args.seed, "device": str(device),
               "train_root": str(args.train_root), "val_root": str(args.val_root),
-              "pretrained": str(args.pretrained),
-              "pretrained_sha256": hashlib.sha256(args.pretrained.read_bytes()).hexdigest(),
+              "pretrained": str(args.pretrained) if args.pretrained is not None else None,
+              "pretrained_sha256": (hashlib.sha256(args.pretrained.read_bytes()).hexdigest()
+                                     if args.pretrained is not None else None),
               "torch_version": torch.__version__, "numpy_version": np.__version__}
 
     model = build_model(args.pretrained, device, dropout_enabled, args.dropout_prob)

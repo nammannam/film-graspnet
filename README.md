@@ -11,6 +11,25 @@ python -m pip install -e .
 The editable install makes `filmgrasp` importable from Python and keeps it
 linked to the code in `src/filmgrasp`.
 
+## Train with a randomly initialized GRConvNet3 backbone
+
+Omit `--pretrained` to initialize the RGB GRConvNet3 backbone from scratch:
+
+```bash
+python -m filmgrasp.training.train \
+  --train-root ../storage/data/train_pilot \
+  --val-root ../storage/data/val_pilot \
+  --epochs 100 --batch-size 4 \
+  --run-name filmgrasp_scratch_pilot01
+```
+
+This still trains FiLM-GraspNet: FiLM and the GRConvNet3 backbone are trainable,
+while the pretrained CLIP text encoder remains frozen. Pass
+`--pretrained checkpoints/grconvnet3_pretrained.pth` explicitly for the existing
+pretrained-backbone behavior. Use a separate run name for each initialization.
+The evaluator reads the run configuration and needs no `--pretrained` argument
+for a scratch-backbone checkpoint.
+
 ## Evaluate and optionally visualize a trusted checkpoint
 
 ```bash

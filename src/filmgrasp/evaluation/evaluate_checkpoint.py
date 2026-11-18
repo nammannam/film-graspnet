@@ -18,6 +18,7 @@ from filmgrasp.evaluation.grasp_metrics import decode_grasp, evaluate_grasp
 from filmgrasp.training.train import (
     _collate,
     _prepare,
+    backbone_init_mode,
     build_model,
     dropout_settings,
     validate_one_epoch,
@@ -230,7 +231,8 @@ def main(argv=None):
     )
     parser.add_argument(
         "--pretrained", type=Path,
-        default=Path("checkpoints/grconvnet3_pretrained.pth")
+        default=None,
+        help="Override backbone weights for pretrained runs; omit for random-init runs"
     )
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--batch-size", type=int, default=4)
@@ -280,14 +282,21 @@ def main(argv=None):
 
     config_path = args.run_dir / "config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
+    init_mode = backbone_init_mode(config)
+    if init_mode == "random" and args.pretrained is not None:
+        parser.error("--pretrained cannot be used with a random-initialized run")
+    pretrained = (args.pretrained or Path("checkpoints/grconvnet3_pretrained.pth")) \
+        if init_mode == "pretrained" else None
 
     expected_pretrained = config.get("pretrained_sha256")
     if expected_pretrained:
-        actual_pretrained = file_sha256(args.pretrained)
+        actual_pretrained = file_sha256(pretrained)
         if actual_pretrained != expected_pretrained:
             raise ValueError("Pretrained backbone SHA-256 mismatch")
 
     checkpoint = load_checkpoint(checkpoint_path)
+    if backbone_init_mode(checkpoint.get("config", {})) != init_mode:
+        raise ValueError("Run and checkpoint backbone initialization mismatch")
     saved_dropout = dropout_settings(checkpoint.get("config", {}))
     if (checkpoint.get("dropout_enabled", saved_dropout[0]),
             checkpoint.get("dropout_prob", saved_dropout[1])) != saved_dropout:
@@ -300,7 +309,7 @@ def main(argv=None):
     print("Device:", args.device)
     print("Building model...")
 
-    model = build_model(args.pretrained, args.device, *saved_dropout)
+    model = build_model(pretrained, args.device, *saved_dropout)
 
     compatibility = model.load_state_dict(
         checkpoint["model_state_dict"], strict=False
