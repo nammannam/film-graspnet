@@ -21,6 +21,7 @@ from filmgrasp.training.train import (
     backbone_init_mode,
     build_model,
     dropout_settings,
+    loss_settings,
     validate_one_epoch,
 )
 
@@ -303,6 +304,12 @@ def main(argv=None):
         raise ValueError("Checkpoint Dropout metadata mismatch")
     if dropout_settings(config) != saved_dropout:
         raise ValueError("Run and checkpoint Dropout configuration mismatch")
+    saved_loss = loss_settings(checkpoint.get("config", {}))
+    if (checkpoint.get("loss_type", saved_loss[0]),
+            checkpoint.get("lambda_bg", saved_loss[1])) != saved_loss:
+        raise ValueError("Checkpoint loss metadata mismatch")
+    if loss_settings(config) != saved_loss:
+        raise ValueError("Run and checkpoint loss configuration mismatch")
 
     print("Checkpoint:", checkpoint_path)
     print("Epoch:", checkpoint["epoch"])
@@ -345,6 +352,9 @@ def main(argv=None):
         "checkpoint": str(checkpoint_path.resolve()),
         "checkpoint_epoch": checkpoint["epoch"],
         "device": args.device,
+        "training_loss_type": saved_loss[0],
+        "training_lambda_bg": saved_loss[1],
+        "evaluation_loss_type": "b0",
         "datasets": {},
     }
 

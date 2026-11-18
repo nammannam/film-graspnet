@@ -20,12 +20,15 @@ from filmgrasp.evaluation.grasp_metrics import evaluate_grasp
 from filmgrasp.models.clip_encoder import CLIPTextEncoder
 from filmgrasp.models.film_grasp import FiLMGraspNet
 from filmgrasp.models.grconvnet3 import GRConvNet3
-from filmgrasp.training.losses import TARGET_NAMES, grasp_loss
+from filmgrasp.training.losses import TARGET_NAMES, grasp_loss, validate_loss_settings
 
 COLUMNS = ["epoch", "train_loss", "train_pos_loss", "train_cos_loss", "train_sin_loss",
            "train_width_loss", "val_loss", "val_pos_loss", "val_cos_loss", "val_sin_loss",
            "val_width_loss", "val_grasp_accuracy", "val_detection_rate", "val_mean_max_iou",
            "learning_rate", "epoch_seconds"]
+A2_DIAGNOSTICS = tuple("{}_{}".format(name, region)
+                       for name in TARGET_NAMES[1:]
+                       for region in ("positive", "background_weighted"))
 
 
 def parse_args(argv=None):
@@ -43,12 +46,18 @@ def parse_args(argv=None):
     parser.add_argument("--pretrained", type=Path, default=None,
                         help="GRConvNet3 weights; omit to train the backbone from random initialization")
     parser.add_argument("--dropout-prob", type=float, default=0.0)
+    parser.add_argument("--loss-type", choices=("b0", "masked_geometry"), default="b0")
+    parser.add_argument("--lambda-bg", type=float, default=0.05)
     parser.add_argument("--resume", type=Path)
     args = parser.parse_args(argv)
     if args.epochs < 1 or args.batch_size < 1 or args.num_workers < 0 or args.lr <= 0:
         parser.error("epochs, batch-size and lr must be positive; num-workers must be nonnegative")
     if not 0 <= args.dropout_prob < 1:
         parser.error("dropout-prob must satisfy 0 <= p < 1")
+    try:
+        validate_loss_settings(args.loss_type, args.lambda_bg)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.device == "cuda" and not torch.cuda.is_available():
         parser.error("CUDA was requested but is unavailable")
     return args
@@ -109,6 +118,12 @@ def dropout_settings(config):
     return enabled, float(prob)
 
 
+def loss_settings(config):
+    """Legacy B0/A1 checkpoints have no loss metadata."""
+    return validate_loss_settings(config.get("loss_type", "b0"),
+                                  config.get("lambda_bg", 0.05))
+
+
 def backbone_init_mode(config):
     """Older checkpoints always loaded pretrained backbone weights."""
     mode = config.get("backbone_init", "pretrained")
@@ -142,14 +157,20 @@ def _prepare(batch, device):
     return images, targets
 
 
-def _loss_totals():
-    return {key: 0.0 for key in ("total",) + TARGET_NAMES}
+def _loss_totals(loss_type="b0"):
+    names = ("total",) + TARGET_NAMES
+    if loss_type == "masked_geometry":
+        names += A2_DIAGNOSTICS
+    return {key: 0.0 for key in names}
 
 
-def _add_loss(totals, loss, components, count):
+def _add_loss(totals, loss, components, count, diagnostics=None):
     totals["total"] += loss.item() * count
     for key in TARGET_NAMES:
         totals[key] += components[key].item() * count
+    if diagnostics is not None:
+        for key in A2_DIAGNOSTICS:
+            totals[key] += diagnostics[key].item() * count
 
 
 def _averages(totals, count):
@@ -158,22 +179,23 @@ def _averages(totals, count):
     return {key: value / count for key, value in totals.items()}
 
 
-def train_one_epoch(model, loader, optimizer, device):
+def train_one_epoch(model, loader, optimizer, device, loss_type="b0", lambda_bg=0.05):
     model.train()
-    totals, count = _loss_totals(), 0
+    totals, count = _loss_totals(loss_type), 0
+    diagnostics = {} if loss_type == "masked_geometry" else None
     for batch in loader:
         images, targets = _prepare(batch, device)
         optimizer.zero_grad(set_to_none=True)
         predictions = model(images, batch["prompt"])
 
-        loss, components = grasp_loss(predictions, targets)
+        loss, components = grasp_loss(predictions, targets, loss_type, lambda_bg, diagnostics)
 
         if not torch.isfinite(loss).item():
             raise FloatingPointError("Nonfinite training loss for {}".format(batch["sample_id"]))
         loss.backward()
         optimizer.step()
         n = images.shape[0]
-        _add_loss(totals, loss, components, n)
+        _add_loss(totals, loss, components, n, diagnostics)
         count += n
     return _averages(totals, count), count
 
@@ -189,18 +211,19 @@ def aggregate_grasps(results):
             "evaluated_samples": n}
 
 
-def validate_one_epoch(model, loader, device, sample_callback=None):
+def validate_one_epoch(model, loader, device, sample_callback=None, loss_type="b0", lambda_bg=0.05):
     model.eval()
-    totals, count, results = _loss_totals(), 0, []
+    totals, count, results = _loss_totals(loss_type), 0, []
+    diagnostics = {} if loss_type == "masked_geometry" else None
     with torch.no_grad():
         for batch in loader:
             images, targets = _prepare(batch, device)
             predictions = model(images, batch["prompt"])
-            loss, components = grasp_loss(predictions, targets)
+            loss, components = grasp_loss(predictions, targets, loss_type, lambda_bg, diagnostics)
             if not torch.isfinite(loss).item():
                 raise FloatingPointError("Nonfinite validation loss for {}".format(batch["sample_id"]))
             n = images.shape[0]
-            _add_loss(totals, loss, components, n)
+            _add_loss(totals, loss, components, n, diagnostics)
             for i, annotations in enumerate(batch["annotations"]):
                 if annotations.ndim != 2 or annotations.shape[1] != 6 or len(annotations) == 0:
                     raise ValueError("Invalid ground truth for {}".format(batch["sample_id"][i]))
@@ -220,11 +243,13 @@ def validate_one_epoch(model, loader, device, sample_callback=None):
 
 def _checkpoint(model, optimizer, epoch, best_accuracy, best_loss, config, data_summary):
     dropout_enabled, dropout_prob = dropout_settings(config)
+    loss_type, lambda_bg = loss_settings(config)
     return {"epoch": epoch, "model_state_dict": {k: v.cpu() for k, v in model.state_dict().items()
              if not k.startswith("text_encoder.")},
             "optimizer_state_dict": optimizer.state_dict(), "best_val_accuracy": best_accuracy,
             "best_val_loss": best_loss, "config": config, "data_summary": data_summary,
             "dropout_enabled": dropout_enabled, "dropout_prob": dropout_prob,
+            "loss_type": loss_type, "lambda_bg": lambda_bg,
             "rng_state": torch.get_rng_state(), "numpy_rng_state": np.random.get_state(),
             "python_rng_state": random.getstate(),
             "cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None}
@@ -253,6 +278,12 @@ def load_checkpoint(path, model, optimizer, config, data_summary):
     saved = load_trusted_training_checkpoint(path)
     old = saved.get("config", {})
     old_dropout = dropout_settings(old)
+    old_loss = loss_settings(old)
+    if (saved.get("loss_type", old_loss[0]),
+            saved.get("lambda_bg", old_loss[1])) != old_loss:
+        raise ValueError("Checkpoint loss metadata mismatch")
+    if old_loss != loss_settings(config):
+        raise ValueError("Resume configuration mismatch: loss settings")
     if (saved.get("dropout_enabled", old_dropout[0]),
             saved.get("dropout_prob", old_dropout[1])) != old_dropout:
         raise ValueError("Checkpoint Dropout metadata mismatch")
@@ -322,6 +353,7 @@ def main(argv=None):
               "backbone": "GRConvNet3 RGB 32 channels dropout={}".format(dropout_enabled),
               "backbone_init": "pretrained" if args.pretrained is not None else "random",
               "dropout_enabled": dropout_enabled, "dropout_prob": args.dropout_prob,
+              "loss_type": args.loss_type, "lambda_bg": args.lambda_bg,
               "clip_model": "ViT-B/32", "clip_device": "cpu", "input_resolution": [416, 416],
               "optimizer": "Adam", "lr": args.lr, "batch_size": args.batch_size, "epochs": args.epochs,
               "num_workers": args.num_workers, "seed": args.seed, "device": str(device),
@@ -345,6 +377,9 @@ def main(argv=None):
     (run_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     (run_dir / "data_summary.json").write_text(json.dumps(data_summary, indent=2), encoding="utf-8")
     csv_path = run_dir / "metrics.csv"
+    columns = COLUMNS + (["{}_{}_loss".format(split, key)
+                          for split in ("train", "val") for key in A2_DIAGNOSTICS]
+                         if args.loss_type == "masked_geometry" else [])
     
 
     if args.resume:
@@ -354,11 +389,13 @@ def main(argv=None):
             rows = list(csv.DictReader(file))
         if [int(row["epoch"]) for row in rows] != list(range(1, start)):
             raise ValueError("CSV epochs do not match checkpoint")
+        if rows and set(rows[0]) != set(columns):
+            raise ValueError("CSV columns do not match loss configuration")
         
     writer = SummaryWriter(str(run_dir / "tensorboard"), purge_step=start)
     
     with csv_path.open("a" if args.resume else "w", newline="", encoding="utf-8") as file:
-        csv_writer = csv.DictWriter(file, fieldnames=COLUMNS)
+        csv_writer = csv.DictWriter(file, fieldnames=columns)
         if not args.resume:
             csv_writer.writeheader()
             
@@ -367,8 +404,8 @@ def main(argv=None):
             train.sampler.generator.manual_seed(args.seed + epoch)
             
             began = time.monotonic()
-            train_metrics, train_count = train_one_epoch(model, train, optimizer, device)
-            val_metrics = validate_one_epoch(model, val, device)
+            train_metrics, train_count = train_one_epoch(model, train, optimizer, device, args.loss_type, args.lambda_bg)
+            val_metrics = validate_one_epoch(model, val, device, loss_type=args.loss_type, lambda_bg=args.lambda_bg)
             
             row = {"epoch": epoch, "train_loss": train_metrics["total"],
                    "val_loss": val_metrics["total"], "val_grasp_accuracy": val_metrics["accuracy"],
@@ -383,6 +420,14 @@ def main(argv=None):
                 writer.add_scalar("LossComponents/train_{}".format(name), train_metrics[name], epoch)
                 writer.add_scalar("LossComponents/validation_{}".format(name), val_metrics[name], epoch)
                 
+            if args.loss_type == "masked_geometry":
+                # A2: diagnostics decompose each weighted geometry head; legacy columns stay intact.
+                for key in A2_DIAGNOSTICS:
+                    row["train_{}_loss".format(key)] = train_metrics[key]
+                    row["val_{}_loss".format(key)] = val_metrics[key]
+                    writer.add_scalar("A2/train_{}".format(key), train_metrics[key], epoch)
+                    writer.add_scalar("A2/validation_{}".format(key), val_metrics[key], epoch)
+
             writer.add_scalar("Loss/train", train_metrics["total"], epoch)
             writer.add_scalar("Loss/validation", val_metrics["total"], epoch)
             writer.add_scalar("Grasp/accuracy", val_metrics["accuracy"], epoch)
