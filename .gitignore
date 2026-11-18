@@ -1,0 +1,44 @@
+# Project documents
+/paper/
+/docs/
+/data_preview/
+/tests/
+
+# Python bytecode and build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Local environments and secrets
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+!.env.sample
+.aws/
+
+# Test, type-checker, and notebook caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+
+# Generated data and experiment results
+/data/
+/datasets/
+/checkpoints/
+/outputs/
+/runs/
+/wandb/
+/mlruns/
+
+# Local editor and OS files
+.idea/
+.DS_Store
+Thumbs.db

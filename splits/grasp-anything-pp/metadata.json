@@ -1,0 +1,10 @@
+{
+  "source": "Fsoft-AIC/LGD",
+  "source_dataset": "grasp-anything++",
+  "seed": 42,
+  "validation_scene_ratio": 0.1,
+  "official_train_ids": 14516,
+  "official_test_seen_ids": 573,
+  "official_test_unseen_ids": 230,
+  "note": "Validation is derived from official training IDs. Official test splits are preserved."
+}
