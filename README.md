@@ -9,6 +9,18 @@ frozen **CLIP** text encoder. Language embeddings modulate visual features via
 FiLM, while the A2 model uses a **Grasp-Aware Geometric Loss** to focus grasp
 geometry learning on valid grasp regions.
 
+## Table of Contents
+
+- [Highlights](#highlights)
+- [Architecture](#architecture)
+- [Model A2 Qualitative Results](#model-a2-film-graspnet-with-grasp-aware-geometric-loss-qualitative-results)
+- [Dataset](#dataset)
+- [Setup](#setup)
+- [Training](#training)
+- [Evaluation](#evaluation)
+- [Project Structure](#project-structure)
+- [Acknowledgments](#acknowledgments)
+
 ---
 
 ## Highlights
