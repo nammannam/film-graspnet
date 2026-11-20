@@ -1,0 +1,17 @@
+{
+  "train_root": "../../storage/data/train_pilot",
+  "val_root": "../../storage/data/val_pilot",
+  "epochs": 100,
+  "batch_size": 4,
+  "lr": 0.0001,
+  "device": "cuda",
+  "num_workers": 0,
+  "seed": 42,
+  "run_name": "filmgrasp_pilot_a2_masked_geometry_bg005_dropout_p01_seed42_100e",
+  "output_root": "../runs",
+  "pretrained": "../checkpoints/grconvnet3_pretrained.pth",
+  "dropout_prob": 0.1,
+  "loss_type": "masked_geometry",
+  "lambda_bg": 0.05,
+  "resume": null
+}

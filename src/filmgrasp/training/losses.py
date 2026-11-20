@@ -18,6 +18,12 @@ def validate_loss_settings(loss_type, lambda_bg):
 
 
 def grasp_loss(predictions, targets, loss_type="b0", lambda_bg=0.05, diagnostics=None):
+    """Return total and per-head Smooth L1 losses.
+
+    ``masked_geometry`` keeps the original full-image denominator while
+    suppressing background geometry pixels by ``lambda_bg``. This preserves
+    the established A2 objective and its recorded experiment results.
+    """
     loss_type, lambda_bg = validate_loss_settings(loss_type, lambda_bg)
     if len(predictions) != len(TARGET_NAMES):
         raise ValueError("Expected four grasp predictions")
@@ -25,13 +31,11 @@ def grasp_loss(predictions, targets, loss_type="b0", lambda_bg=0.05, diagnostics
     components = {}
     if diagnostics is not None:
         diagnostics.clear()
+
     # A2: use ground-truth position support; retain the B0 pixel denominator.
     mask = (targets["pos"] > 0) if loss_type == "masked_geometry" else None
 
-    for name, prediction in zip(
-        TARGET_NAMES,
-        predictions,
-    ):
+    for name, prediction in zip(TARGET_NAMES, predictions):
         target = targets[name]
 
         if prediction.shape != target.shape:
@@ -50,9 +54,7 @@ def grasp_loss(predictions, targets, loss_type="b0", lambda_bg=0.05, diagnostics
             background = (elementwise * (~mask)).mean() * lambda_bg
             components[name] = positive + background
             if diagnostics is not None:
-                diagnostics[name + "_positive"] = positive
-                diagnostics[name + "_background_weighted"] = background
+                diagnostics["{}_positive".format(name)] = positive
+                diagnostics["{}_background_weighted".format(name)] = background
 
-    total_loss = sum(components.values())
-
-    return total_loss, components
+    return sum(components.values()), components

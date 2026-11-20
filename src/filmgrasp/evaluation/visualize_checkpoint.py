@@ -105,11 +105,20 @@ def render_figure(path, rgb, prompt, sample_id, annotations, prediction, result,
     if prediction is not None:
         axes[2].plot(prediction.center[1], prediction.center[0], marker="+", markersize=12,
                      markeredgewidth=2, color="cyan")
-    fig.colorbar(heatmap, ax=axes[2], shrink=0.77, label="Raw position head (display clipped to 0–1)")
+    fig.colorbar(
+        heatmap,
+        ax=axes[2],
+        shrink=0.77,
+        label="Raw position head (display clipped to 0–1)",
+    )
     label = "SUCCESS" if result["success"] else "FAILURE"
     title = "{}  |  detected={}  |  IoU {:.4f}  |  {}".format(
         sample_id, result.get("detected", prediction is not None), result["max_iou"], label)
-    fig.suptitle(title + "\n" + textwrap.fill(prompt, width=100), fontsize=12, fontweight="semibold")
+    fig.suptitle(
+        title + "\n" + textwrap.fill(prompt, width=100),
+        fontsize=12,
+        fontweight="semibold",
+    )
     fig.legend(handles=[Line2D([0], [0], color="#19a65a", lw=2, label="Ground truth"),
                         Line2D([0], [0], color="#e53935", lw=2, label="Top-1 prediction"),
                         Line2D([0], [0], marker="+", color="cyan", linestyle="None",

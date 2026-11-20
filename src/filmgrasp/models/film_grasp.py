@@ -1,11 +1,9 @@
 
 """Language-Conditioned FiLM-GraspNet."""
 
-import torch
 import torch.nn as nn
 
 from filmgrasp.models.grconvnet3 import GRConvNet3
-from filmgrasp.models.clip_encoder import CLIPTextEncoder
 from filmgrasp.models.film import FiLMLayer
 
 

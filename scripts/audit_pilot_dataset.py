@@ -420,7 +420,7 @@ def main():
     parser.add_argument("--train-root", type=Path, default=Path("../storage/data/train_pilot"))
     parser.add_argument("--val-root", type=Path, default=Path("../storage/data/val_pilot"))
     parser.add_argument("--split-root", type=Path, default=Path("splits/grasp-anything-pp"))
-    parser.add_argument("--output-dir", type=Path, default=Path("runs/dataset_audits/m6_1b"))
+    parser.add_argument("--output-dir", type=Path, default=Path("tests/dataset_audits/m6_1b"))
     summary, _, _ = audit(parser.parse_args())
     return 1 if summary["status"] == "FAILED" else 0
 

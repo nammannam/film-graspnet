@@ -1,6 +1,6 @@
 """M6.1c: deterministic, resumable official-split extraction.
 
-Run from the film-graspnet repository with the filmgrasp39 environment.
+Run from the film-graspnet repository with the project environment.
 The plan is frozen before any member bytes are read. No pilot files are used.
 """
 
@@ -22,7 +22,7 @@ from zipfile import ZipFile
 from huggingface_hub import HfFileSystem
 from PIL import Image
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 from prepare_subset import INSTRUCTION_ZIP, POSITIVE_ZIP, load_split_ids

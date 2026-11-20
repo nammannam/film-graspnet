@@ -17,21 +17,19 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
+from filmgrasp.data.annotations import load_grasp_tensor
 from filmgrasp.data.targets import build_grasp_targets
+
+IMAGE_SIZE = (416, 416)
 
 
 class GraspAnythingPPDataset(Dataset):
     def __init__(self, root, include_annotations=False):
         self.root = Path(root)
         self.include_annotations = include_annotations
-
         manifest_path = self.root / "manifest.json"
-
-        with manifest_path.open("r", encoding="utf-8") as file:
-            data = json.load(file)
-
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.samples = data["samples"]
-
         if not self.samples:
             raise ValueError("Dataset is empty")
 
@@ -44,34 +42,16 @@ class GraspAnythingPPDataset(Dataset):
         image_path = self.root / record["image_path"]
         grasp_path = self.root / record["grasp_path"]
 
-        # Read RGB image.
         with Image.open(image_path) as image:
             image = image.convert("RGB")
+            if image.size != IMAGE_SIZE:
+                raise ValueError("Expected 416x416, got {}".format(image.size))
+            image_array = np.asarray(image, dtype=np.float32) / 255.0
 
-            if image.size != (416, 416):
-                raise ValueError(
-                    f"Expected 416x416, got {image.size}"
-                )
-
-            image_array = np.asarray(
-                image, dtype=np.float32
-            ) / 255.0
-
-        image_tensor = torch.from_numpy(
-            image_array.transpose(2, 0, 1).copy()
-        )
-
-        # Read grasp annotations.
-        grasps = torch.load(
-            grasp_path,
-            map_location="cpu"
-        )
-
-        # Convert annotations to dense target maps.
-        targets = build_grasp_targets(
-            grasps,
-            image_size=(416, 416)
-        )
+        # copy() makes the transposed array contiguous and writable for PyTorch.
+        image_tensor = torch.from_numpy(image_array.transpose(2, 0, 1).copy())
+        grasps = load_grasp_tensor(grasp_path)
+        targets = build_grasp_targets(grasps, image_size=IMAGE_SIZE)
 
         sample = {
             "image": image_tensor,

@@ -1,9 +1,12 @@
-# Project documents
-/paper/
-/docs/
-/data_preview/
-/tests/
-/reports/
+# Keep the repository focused: ignore every top-level directory by default.
+/*/
+
+# Version-controlled project directories.
+!/configs/
+!/figures/
+!/scripts/
+!/splits/
+!/src/
 
 # Python bytecode and build artifacts
 __pycache__/
@@ -30,16 +33,8 @@ env/
 .coverage
 htmlcov/
 
-# Generated data and experiment results
-/data/
-/datasets/
-/checkpoints/
-/outputs/
-/runs/
-/wandb/
-/mlruns/
-
-# Local editor and OS files
+# Local editor and OS files (also covered by the top-level allowlist).
 .idea/
+.vscode/
 .DS_Store
 Thumbs.db

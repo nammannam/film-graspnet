@@ -2,7 +2,6 @@
 
 import argparse
 import csv
-import hashlib
 import inspect
 import json
 import random
@@ -15,15 +14,15 @@ from torch.utils.data import DataLoader
 
 from filmgrasp.data.dataset import GraspAnythingPPDataset
 from filmgrasp.evaluation.grasp_metrics import decode_grasp, evaluate_grasp
-from filmgrasp.training.train import (
-    _collate,
-    _prepare,
-    backbone_init_mode,
-    build_model,
-    dropout_settings,
-    loss_settings,
+from filmgrasp.models.factory import build_model
+from filmgrasp.training.checkpoints import validate_evaluation_checkpoint
+from filmgrasp.training.engine import (
+    collate_samples,
+    prepare_batch,
     validate_one_epoch,
 )
+from filmgrasp.training.settings import backbone_init_mode
+from filmgrasp.utils import file_sha256
 
 
 def parse_dataset(value):
@@ -33,6 +32,107 @@ def parse_dataset(value):
             "Expected NAME=PATH, e.g. train=../storage/data/train_pilot"
         )
     return name, Path(path).expanduser()
+
+
+def _build_parser():
+    parser = argparse.ArgumentParser(description="Evaluate FiLM-GraspNet without training.")
+    parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument(
+        "--checkpoint",
+        default="best",
+        help="'best', 'last', or a checkpoint path",
+    )
+    parser.add_argument(
+        "--dataset",
+        action="append",
+        type=parse_dataset,
+        required=True,
+        metavar="NAME=PATH",
+    )
+    parser.add_argument(
+        "--pretrained",
+        type=Path,
+        default=None,
+        help="Override backbone weights for pretrained runs; omit for random-init runs",
+    )
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--visualize", action="store_true")
+    parser.add_argument("--max-visualizations", type=int, default=20)
+    parser.add_argument("--visualization-dir", type=Path)
+    parser.add_argument(
+        "--visualization-selection",
+        choices=("random", "failures", "successes"),
+        default="random",
+    )
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--paired-samples", nargs=2, metavar=("SAMPLE_A", "SAMPLE_B"))
+    parser.add_argument("--paired-output", type=Path)
+    return parser
+
+
+def parse_args(argv=None):
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.batch_size < 1 or args.num_workers < 0:
+        parser.error("Invalid batch size or num workers")
+    if args.device == "cuda" and not torch.cuda.is_available():
+        parser.error("CUDA is unavailable")
+
+    names = [name for name, _ in args.dataset]
+    if len(names) != len(set(names)):
+        parser.error("Duplicate dataset names")
+    if args.visualize and args.max_visualizations < 1:
+        parser.error("--max-visualizations must be positive")
+    invalid_names = any(Path(name).name != name or name in (".", "..") for name in names)
+    if args.visualize and invalid_names:
+        parser.error("Visualization dataset names must be single directory names")
+    if args.paired_samples and (len(args.dataset) != 1 or args.visualize or args.output):
+        parser.error(
+            "Paired mode requires one dataset and cannot combine with --visualize or --output"
+        )
+    if args.paired_output and not args.paired_samples:
+        parser.error("--paired-output requires --paired-samples")
+    return args
+
+
+def _checkpoint_path(args):
+    if args.checkpoint in ("best", "last"):
+        return args.run_dir / "checkpoints" / (args.checkpoint + ".pt")
+    return Path(args.checkpoint)
+
+
+def _resolve_pretrained(args, config):
+    init_mode = backbone_init_mode(config)
+    if init_mode == "random":
+        if args.pretrained is not None:
+            raise ValueError("--pretrained cannot be used with a random-initialized run")
+        return None
+    pretrained = args.pretrained or Path("checkpoints/grconvnet3_pretrained.pth")
+    expected_hash = config.get("pretrained_sha256")
+    if expected_hash and file_sha256(pretrained) != expected_hash:
+        raise ValueError("Pretrained backbone SHA-256 mismatch")
+    return pretrained
+
+
+def _restore_model(checkpoint, pretrained, device, dropout):
+    model = build_model(pretrained, device, *dropout)
+    compatibility = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+    missing = list(compatibility.missing_keys)
+    unexpected = list(compatibility.unexpected_keys)
+    invalid_missing = [
+        name for name in missing if not name.startswith("text_encoder.clip_model.")
+    ]
+    if unexpected or invalid_missing:
+        raise RuntimeError(
+            "Model state mismatch: missing={} unexpected={}".format(
+                invalid_missing, unexpected
+            )
+        )
+    model.eval()
+    return model, missing
 
 
 def install_numpy_compat():
@@ -61,14 +161,6 @@ def load_checkpoint(path):
         kwargs["weights_only"] = False
 
     return torch.load(path, **kwargs)
-
-
-def file_sha256(path):
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def check_dataset_provenance(checkpoint, name, root):
@@ -196,7 +288,7 @@ def visualize_instruction_pair(model, root, sample_ids, device, output):
     model.eval()
     with torch.no_grad():
         for sample in samples:
-            images, _ = _prepare(_collate([sample]), device)
+            images, _ = prepare_batch(collate_samples([sample]), device)
             heads = model(images, [sample["prompt"]])
             single = tuple(head[0] for head in heads)
             result = evaluate_grasp(single, sample["annotations"])
@@ -218,64 +310,13 @@ def visualize_instruction_pair(model, root, sample_ids, device, output):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(
-        description="Evaluate FiLM-GraspNet without training."
-    )
-    parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument(
-        "--checkpoint", default="best",
-        help="'best', 'last', or a checkpoint path"
-    )
-    parser.add_argument(
-        "--dataset", action="append", type=parse_dataset,
-        required=True, metavar="NAME=PATH"
-    )
-    parser.add_argument(
-        "--pretrained", type=Path,
-        default=None,
-        help="Override backbone weights for pretrained runs; omit for random-init runs"
-    )
-    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
-    parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--output", type=Path)
-    parser.add_argument("--visualize", action="store_true")
-    parser.add_argument("--max-visualizations", type=int, default=20)
-    parser.add_argument("--visualization-dir", type=Path)
-    parser.add_argument("--visualization-selection", choices=("random", "failures", "successes"),
-                        default="random")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--paired-samples", nargs=2, metavar=("SAMPLE_A", "SAMPLE_B"))
-    parser.add_argument("--paired-output", type=Path)
-
-    args = parser.parse_args(argv)
-
-    if args.batch_size < 1 or args.num_workers < 0:
-        parser.error("Invalid batch size or num workers")
-    if args.device == "cuda" and not torch.cuda.is_available():
-        parser.error("CUDA is unavailable")
-
+    args = parse_args(argv)
     names = [name for name, _ in args.dataset]
-    if len(names) != len(set(names)):
-        parser.error("Duplicate dataset names")
-    if args.visualize and args.max_visualizations < 1:
-        parser.error("--max-visualizations must be positive")
-    if args.visualize and any(Path(name).name != name or name in (".", "..") for name in names):
-        parser.error("Visualization dataset names must be single directory names")
-    if args.paired_samples and (len(args.dataset) != 1 or args.visualize or args.output):
-        parser.error("Paired mode requires one dataset and cannot combine with --visualize or --output")
-    if args.paired_output and not args.paired_samples:
-        parser.error("--paired-output requires --paired-samples")
-
-    if args.checkpoint in ("best", "last"):
-        checkpoint_path = (
-            args.run_dir / "checkpoints" /
-            (args.checkpoint + ".pt")
-        )
-    else:
-        checkpoint_path = Path(args.checkpoint)
-
-    visualization_base = args.visualization_dir or args.run_dir / "visualizations" / checkpoint_path.stem
+    checkpoint_path = _checkpoint_path(args)
+    visualization_base = (
+        args.visualization_dir
+        or args.run_dir / "visualizations" / checkpoint_path.stem
+    )
     if args.visualize:
         for name in names:
             if (visualization_base / name).exists():
@@ -283,68 +324,25 @@ def main(argv=None):
 
     config_path = args.run_dir / "config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    init_mode = backbone_init_mode(config)
-    if init_mode == "random" and args.pretrained is not None:
-        parser.error("--pretrained cannot be used with a random-initialized run")
-    pretrained = (args.pretrained or Path("checkpoints/grconvnet3_pretrained.pth")) \
-        if init_mode == "pretrained" else None
-
-    expected_pretrained = config.get("pretrained_sha256")
-    if expected_pretrained:
-        actual_pretrained = file_sha256(pretrained)
-        if actual_pretrained != expected_pretrained:
-            raise ValueError("Pretrained backbone SHA-256 mismatch")
-
+    pretrained = _resolve_pretrained(args, config)
     checkpoint = load_checkpoint(checkpoint_path)
-    if backbone_init_mode(checkpoint.get("config", {})) != init_mode:
-        raise ValueError("Run and checkpoint backbone initialization mismatch")
-    saved_dropout = dropout_settings(checkpoint.get("config", {}))
-    if (checkpoint.get("dropout_enabled", saved_dropout[0]),
-            checkpoint.get("dropout_prob", saved_dropout[1])) != saved_dropout:
-        raise ValueError("Checkpoint Dropout metadata mismatch")
-    if dropout_settings(config) != saved_dropout:
-        raise ValueError("Run and checkpoint Dropout configuration mismatch")
-    saved_loss = loss_settings(checkpoint.get("config", {}))
-    if (checkpoint.get("loss_type", saved_loss[0]),
-            checkpoint.get("lambda_bg", saved_loss[1])) != saved_loss:
-        raise ValueError("Checkpoint loss metadata mismatch")
-    if loss_settings(config) != saved_loss:
-        raise ValueError("Run and checkpoint loss configuration mismatch")
+    saved_dropout, saved_loss = validate_evaluation_checkpoint(checkpoint, config)
 
     print("Checkpoint:", checkpoint_path)
     print("Epoch:", checkpoint["epoch"])
     print("Device:", args.device)
     print("Building model...")
 
-    model = build_model(pretrained, args.device, *saved_dropout)
-
-    compatibility = model.load_state_dict(
-        checkpoint["model_state_dict"], strict=False
-    )
-
-    missing = list(compatibility.missing_keys)
-    unexpected = list(compatibility.unexpected_keys)
-    invalid_missing = [
-        key for key in missing
-        if not key.startswith("text_encoder.clip_model.")
-    ]
-
-    if unexpected or invalid_missing:
-        raise RuntimeError(
-            "Model state mismatch: missing={} unexpected={}".format(
-                invalid_missing, unexpected
-            )
-        )
-
-    model.eval()
-
+    model, missing = _restore_model(checkpoint, pretrained, args.device, saved_dropout)
     print("Backbone/FiLM state: OK")
     print("Frozen CLIP tensors omitted:", len(missing))
 
     if args.paired_samples:
         name, root = args.dataset[0]
         check_dataset_provenance(checkpoint, name, root)
-        output = args.paired_output or args.run_dir / "visualizations" / "instruction_sensitivity" / "pair.png"
+        output = args.paired_output or (
+            args.run_dir / "visualizations" / "instruction_sensitivity" / "pair.png"
+        )
         visualize_instruction_pair(model, root, args.paired_samples, args.device, output)
         return
 
@@ -371,7 +369,7 @@ def main(argv=None):
             batch_size=args.batch_size,
             shuffle=False,
             num_workers=args.num_workers,
-            collate_fn=_collate,
+            collate_fn=collate_samples,
         )
 
         collector = (VisualizationCollector(args.visualization_selection,
